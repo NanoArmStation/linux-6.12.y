@@ -830,7 +830,7 @@ static struct platform_driver rockchip_sfc_driver = {
 		.pm = &rockchip_sfc_pm_ops,
 	},
 	.probe	= rockchip_sfc_probe,
-	.remove_new = rockchip_sfc_remove,
+	.remove = rockchip_sfc_remove,
 };
 module_platform_driver(rockchip_sfc_driver);
 
