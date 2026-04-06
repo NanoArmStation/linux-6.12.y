@@ -12,7 +12,6 @@
 #include <linux/module.h>
 #include <linux/phy.h>
 #include <linux/of.h>
-#include <linux/property.h>
 
 #define PHY_ID_YT8511		0x0000010a
 #define PHY_ID_YT8521		0x0000011a
@@ -169,13 +168,6 @@
 #define YT8531_LDO_VOL_3V3			0x0
 #define YT8531_LDO_VOL_1V8			0x2
 
-/* 0xA00B, 0xA00C, 0xA00D, 0xA00E, 0xA00F are LED registres */
-#define YT8531_LED_GENERAL_CFG	0xA00B
-#define YT8531_LED0_CFG		0xA00C
-#define YT8531_LED1_CFG		0xA00D
-#define YT8531_LED2_CFG		0xA00E
-#define YT8531_LED_BLINK_CFG	0xA00F
-
 /* 1b0 disable 1.9ns rxc clock delay  *default*
  * 1b1 enable 1.9ns rxc clock delay
  */
@@ -221,6 +213,20 @@
 #define YT8521_RC1R_RGMII_1_950_NS		13
 #define YT8521_RC1R_RGMII_2_100_NS		14
 #define YT8521_RC1R_RGMII_2_250_NS		15
+
+/* LED CONFIG */
+#define YT8521_MAX_LEDS				3
+#define YT8521_LED0_CFG_REG			0xA00C
+#define YT8521_LED1_CFG_REG			0xA00D
+#define YT8521_LED2_CFG_REG			0xA00E
+#define YT8521_LED_ACT_BLK_IND			BIT(13)
+#define YT8521_LED_FDX_ON_EN			BIT(12)
+#define YT8521_LED_HDX_ON_EN			BIT(11)
+#define YT8521_LED_TXACT_BLK_EN			BIT(10)
+#define YT8521_LED_RXACT_BLK_EN			BIT(9)
+#define YT8521_LED_1000_ON_EN			BIT(6)
+#define YT8521_LED_100_ON_EN			BIT(5)
+#define YT8521_LED_10_ON_EN			BIT(4)
 
 #define YTPHY_MISC_CONFIG_REG			0xA006
 #define YTPHY_MCR_FIBER_SPEED_MASK		BIT(0)
@@ -378,6 +384,8 @@ struct yt8521_priv {
 	 * YT8521_RSSR_TO_BE_ARBITRATED
 	 */
 	u8 reg_page;
+	bool led_dts_cfg[YT8521_MAX_LEDS];
+	u16 led_vals[YT8521_MAX_LEDS];
 };
 
 /**
@@ -905,6 +913,10 @@ static int ytphy_rgmii_clk_delay_config(struct phy_device *phydev)
 		val |= FIELD_PREP(YT8521_RC1R_RX_DELAY_MASK, rx_reg) |
 		       FIELD_PREP(YT8521_RC1R_GE_TX_DELAY_MASK, tx_reg);
 		break;
+	case PHY_INTERFACE_MODE_GMII:
+		if (phydev->drv->phy_id != PHY_ID_YT8531S)
+			return -EOPNOTSUPP;
+		return 0;
 	default: /* do not support other modes */
 		return -EOPNOTSUPP;
 	}
@@ -1034,6 +1046,102 @@ static int yt8531_set_ds(struct phy_device *phydev)
 	return 0;
 }
 
+static const struct {
+	const char *name;
+	u16 mask;
+} yt8521_led_trigger_map[] = {
+	{ "activity", YT8521_LED_ACT_BLK_IND | YT8521_LED_TXACT_BLK_EN | YT8521_LED_RXACT_BLK_EN},
+	{ "full-duplex", YT8521_LED_FDX_ON_EN },
+	{ "half-duplex", YT8521_LED_HDX_ON_EN },
+	{ "link-10", YT8521_LED_10_ON_EN },
+	{ "link-100", YT8521_LED_100_ON_EN },
+	{ "link-1000", YT8521_LED_1000_ON_EN },
+};
+
+static const char *led_propnames[YT8521_MAX_LEDS] = {
+	"motorcomm,led0-triggers",
+	"motorcomm,led1-triggers",
+	"motorcomm,led2-triggers",
+};
+
+static int yt8521_parse_led_triggers(struct phy_device *phydev, u8 led_index,
+				     const char *propname)
+{
+	struct device_node *np = phydev->mdio.dev.of_node;
+	struct yt8521_priv *priv = phydev->priv;
+	const char **trigger_names;
+	int count, i, j;
+	u16 val = 0;
+	int ret;
+
+	count = of_property_count_strings(np, propname);
+	if (count <= 0)
+		return 0;
+
+	trigger_names = kcalloc(count, sizeof(char *), GFP_KERNEL);
+	if (!trigger_names)
+		return -ENOMEM;
+
+	ret = of_property_read_string_array(np, propname, trigger_names, count);
+	if (ret < 0) {
+		kfree(trigger_names);
+		return ret;
+	}
+
+	for (i = 0; i < count; i++) {
+		bool found = false;
+		for (j = 0; j < ARRAY_SIZE(yt8521_led_trigger_map); j++) {
+			if (strcmp(trigger_names[i], yt8521_led_trigger_map[j].name) == 0) {
+				val |= yt8521_led_trigger_map[j].mask;
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			phydev_warn(phydev, "Unknown LED trigger '%s' for LED%d\n",
+				    trigger_names[i], led_index);
+		}
+	}
+	kfree(trigger_names);
+
+	ret = ytphy_write_ext_with_lock(phydev, YT8521_LED0_CFG_REG + led_index, val);
+	if (ret < 0) {
+		phydev_err(phydev, "Failed to write LED%d config, err=%d\n",
+			   led_index, ret);
+		return ret;
+	}
+
+	priv->led_vals[led_index] = val;
+	priv->led_dts_cfg[led_index] = true;
+	phydev_dbg(phydev, "LED%d configured via DTS with triggers, val=0x%04x\n",
+		   led_index, val);
+
+	return 0;
+}
+
+static inline void yt8521_restore_leds(struct phy_device *phydev)
+{
+	struct yt8521_priv *priv = phydev->priv;
+	int i, ret;
+
+	if (!priv)
+		return;
+
+	for (i = 0; i < YT8521_MAX_LEDS; i++) {
+		if (priv->led_dts_cfg[i]) {
+			ret = ytphy_write_ext_with_lock(phydev,
+							YT8521_LED0_CFG_REG + i,
+							priv->led_vals[i]);
+			if (ret < 0)
+				phydev_err(phydev, "Failed to restore LED%d config: %d\n",
+					   i, ret);
+			else
+				phydev_dbg(phydev, "Restored LED%d config to 0x%04x\n",
+					   i, priv->led_vals[i]);
+		}
+	}
+}
+
 /**
  * yt8521_probe() - read chip config then set suitable polling_mode
  * @phydev: a pointer to a &struct phy_device
@@ -1048,13 +1156,16 @@ static int yt8521_probe(struct phy_device *phydev)
 	int chip_config;
 	u16 mask, val;
 	u32 freq;
-	int ret;
+	int ret, i;
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
 
 	phydev->priv = priv;
+
+	for (i = 0; i < YT8521_MAX_LEDS; i++)
+		yt8521_parse_led_triggers(phydev, i, led_propnames[i]);
 
 	chip_config = ytphy_read_ext_with_lock(phydev, YT8521_CHIP_CONFIG_REG);
 	if (chip_config < 0)
@@ -1161,51 +1272,20 @@ static int yt8521_probe(struct phy_device *phydev)
 static int yt8531_probe(struct phy_device *phydev)
 {
 	struct device_node *node = phydev->mdio.dev.of_node;
+	struct device *dev = &phydev->mdio.dev;
+	struct yt8521_priv *priv;
 	u16 mask, val;
 	u32 freq;
-	u32 led_data;
-	int ret;
+	int i;
 
-	/* Configure LED registers if properties exist */
-	if (!device_property_read_u32(&phydev->mdio.dev, "motorcomm,yt8531-led-general-cfg", &led_data)) {
-		ret = ytphy_write_ext(phydev, YT8531_LED_GENERAL_CFG, led_data);
-		if (ret < 0)
-			dev_warn(&phydev->mdio.dev, "Failed to set LED general config: %d\n", ret);
-		else
-			dev_dbg(&phydev->mdio.dev, "Set LED general config: 0x%04x\n", led_data);
-	}
+	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	if(!priv)
+		return -ENOMEM;
 
-	if (!device_property_read_u32(&phydev->mdio.dev, "motorcomm,yt8531-led0-cfg", &led_data)) {
-		ret = ytphy_write_ext(phydev, YT8531_LED0_CFG, led_data);
-		if (ret < 0)
-			dev_warn(&phydev->mdio.dev, "Failed to set LED0 config: %d\n", ret);
-		else
-			dev_dbg(&phydev->mdio.dev,  "Set LED0 config: 0x%04x\n", led_data);
-	}
+	phydev->priv = priv;
 
-	if (!device_property_read_u32(&phydev->mdio.dev, "motorcomm,yt8531-led1-cfg", &led_data)) {
-		ret = ytphy_write_ext(phydev, YT8531_LED1_CFG, led_data);
-		if (ret < 0)
-			dev_warn(&phydev->mdio.dev, "Failed to set LED1 config: %d\n", ret);
-		else
-			dev_dbg(&phydev->mdio.dev,  "Set LED1 config: 0x%04x\n", led_data);
-	}
-
-	if (!device_property_read_u32(&phydev->mdio.dev, "motorcomm,yt8531-led2-cfg", &led_data)) {
-		ret = ytphy_write_ext(phydev, YT8531_LED2_CFG, led_data);
-		if (ret < 0)
-			dev_warn(&phydev->mdio.dev, "Failed to set LED2 config: %d\n", ret);
-		else
-			dev_dbg(&phydev->mdio.dev,  "Set LED2 config: 0x%04x\n", led_data);
-	}
-
-	if (!device_property_read_u32(&phydev->mdio.dev, "motorcomm,yt8531-led-blink-cfg", &led_data)) {
-		ret = ytphy_write_ext(phydev, YT8531_LED_BLINK_CFG, led_data);
-		if (ret < 0)
-			dev_warn(&phydev->mdio.dev, "Failed to set LED2 config: %d\n", ret);
-		else
-			dev_dbg(&phydev->mdio.dev,  "Set LED blink config: 0x%04x\n", led_data);
-	}
+	for (i = 0; i < YT8521_MAX_LEDS; i++)
+		yt8521_parse_led_triggers(phydev, i, led_propnames[i]);
 
 	if (of_property_read_u32(node, "motorcomm,clk-out-frequency-hz", &freq))
 		freq = YTPHY_DTS_OUTPUT_CLK_DIS;
@@ -1729,8 +1809,124 @@ static int yt8521_config_init(struct phy_device *phydev)
 		if (ret < 0)
 			goto err_restore_page;
 	}
+
+	yt8521_restore_leds(phydev);
+
 err_restore_page:
 	return phy_restore_page(phydev, old_page, ret);
+}
+
+static const unsigned long supported_trgs = (BIT(TRIGGER_NETDEV_FULL_DUPLEX) |
+					     BIT(TRIGGER_NETDEV_HALF_DUPLEX) |
+					     BIT(TRIGGER_NETDEV_LINK)        |
+					     BIT(TRIGGER_NETDEV_LINK_10)     |
+					     BIT(TRIGGER_NETDEV_LINK_100)    |
+					     BIT(TRIGGER_NETDEV_LINK_1000)   |
+					     BIT(TRIGGER_NETDEV_RX)          |
+					     BIT(TRIGGER_NETDEV_TX));
+
+static int yt8521_led_hw_is_supported(struct phy_device *phydev, u8 index,
+				      unsigned long rules)
+{
+	struct yt8521_priv *priv = phydev->priv;
+
+	if (priv && index < YT8521_MAX_LEDS && priv->led_dts_cfg[index])
+		return -EOPNOTSUPP;
+
+	if (index >= YT8521_MAX_LEDS)
+		return -EINVAL;
+
+	/* All combinations of the supported triggers are allowed */
+	if (rules & ~supported_trgs)
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
+static int yt8521_led_hw_control_set(struct phy_device *phydev, u8 index,
+				     unsigned long rules)
+{
+	struct yt8521_priv *priv = phydev->priv;
+	u16 val = 0;
+
+	if (priv && index < YT8521_MAX_LEDS && priv->led_dts_cfg[index])
+		return -EOPNOTSUPP;
+
+	if (index >= YT8521_MAX_LEDS)
+		return -EINVAL;
+
+	if (test_bit(TRIGGER_NETDEV_LINK, &rules)) {
+		val |= YT8521_LED_10_ON_EN;
+		val |= YT8521_LED_100_ON_EN;
+		val |= YT8521_LED_1000_ON_EN;
+	}
+
+	if (test_bit(TRIGGER_NETDEV_LINK_10, &rules))
+		val |= YT8521_LED_10_ON_EN;
+
+	if (test_bit(TRIGGER_NETDEV_LINK_100, &rules))
+		val |= YT8521_LED_100_ON_EN;
+
+	if (test_bit(TRIGGER_NETDEV_LINK_1000, &rules))
+		val |= YT8521_LED_1000_ON_EN;
+
+	if (test_bit(TRIGGER_NETDEV_FULL_DUPLEX, &rules))
+		val |= YT8521_LED_FDX_ON_EN;
+
+	if (test_bit(TRIGGER_NETDEV_HALF_DUPLEX, &rules))
+		val |= YT8521_LED_HDX_ON_EN;
+
+	if (test_bit(TRIGGER_NETDEV_TX, &rules) ||
+	    test_bit(TRIGGER_NETDEV_RX, &rules))
+		val |= YT8521_LED_ACT_BLK_IND;
+
+	if (test_bit(TRIGGER_NETDEV_TX, &rules))
+		val |= YT8521_LED_TXACT_BLK_EN;
+
+	if (test_bit(TRIGGER_NETDEV_RX, &rules))
+		val |= YT8521_LED_RXACT_BLK_EN;
+
+	return ytphy_write_ext(phydev, YT8521_LED0_CFG_REG + index, val);
+}
+
+static int yt8521_led_hw_control_get(struct phy_device *phydev, u8 index,
+				     unsigned long *rules)
+{
+	struct yt8521_priv *priv = phydev->priv;
+	int val;
+
+	if (priv && index < YT8521_MAX_LEDS && priv->led_dts_cfg[index])
+		return -EOPNOTSUPP;
+
+	if (index >= YT8521_MAX_LEDS)
+		return -EINVAL;
+
+	val = ytphy_read_ext(phydev, YT8521_LED0_CFG_REG + index);
+	if (val < 0)
+		return val;
+
+	if (val & YT8521_LED_TXACT_BLK_EN || val & YT8521_LED_ACT_BLK_IND)
+		__set_bit(TRIGGER_NETDEV_TX, rules);
+
+	if (val & YT8521_LED_RXACT_BLK_EN || val & YT8521_LED_ACT_BLK_IND)
+		__set_bit(TRIGGER_NETDEV_RX, rules);
+
+	if (val & YT8521_LED_FDX_ON_EN)
+		__set_bit(TRIGGER_NETDEV_FULL_DUPLEX, rules);
+
+	if (val & YT8521_LED_HDX_ON_EN)
+		__set_bit(TRIGGER_NETDEV_HALF_DUPLEX, rules);
+
+	if (val & YT8521_LED_1000_ON_EN)
+		__set_bit(TRIGGER_NETDEV_LINK_1000, rules);
+
+	if (val & YT8521_LED_100_ON_EN)
+		__set_bit(TRIGGER_NETDEV_LINK_100, rules);
+
+	if (val & YT8521_LED_10_ON_EN)
+		__set_bit(TRIGGER_NETDEV_LINK_10, rules);
+
+	return 0;
 }
 
 static int yt8531_config_init(struct phy_device *phydev)
@@ -1763,6 +1959,8 @@ static int yt8531_config_init(struct phy_device *phydev)
 	ret = yt8531_set_ds(phydev);
 	if (ret < 0)
 		return ret;
+
+	yt8521_restore_leds(phydev);
 
 	return 0;
 }
@@ -2972,6 +3170,9 @@ static struct phy_driver motorcomm_phy_drvs[] = {
 		.soft_reset	= yt8521_soft_reset,
 		.suspend	= yt8521_suspend,
 		.resume		= yt8521_resume,
+		.led_hw_is_supported = yt8521_led_hw_is_supported,
+		.led_hw_control_set = yt8521_led_hw_control_set,
+		.led_hw_control_get = yt8521_led_hw_control_get,
 	},
 	{
 		PHY_ID_MATCH_EXACT(PHY_ID_YT8531),
@@ -2983,6 +3184,9 @@ static struct phy_driver motorcomm_phy_drvs[] = {
 		.get_wol	= ytphy_get_wol,
 		.set_wol	= yt8531_set_wol,
 		.link_change_notify = yt8531_link_change_notify,
+		.led_hw_is_supported = yt8521_led_hw_is_supported,
+		.led_hw_control_set = yt8521_led_hw_control_set,
+		.led_hw_control_get = yt8521_led_hw_control_get,
 	},
 	{
 		PHY_ID_MATCH_EXACT(PHY_ID_YT8531S),

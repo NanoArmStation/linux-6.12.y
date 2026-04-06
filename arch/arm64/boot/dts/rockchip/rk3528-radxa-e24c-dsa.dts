@@ -13,14 +13,29 @@
 	/delete-node/ switch0;
 };
 
+&gmac1 {
+	/delete-property/ snps,reset-active-low;
+	/delete-property/ snps,reset-delays-us;
+	/delete-property/ snps,reset-gpio;
+	label = "eth0";
+	phy_mode = "rgmii-id";
+
+	tx_delay = <0>;
+	rx_delay = <0>;
+};
+
 &mdio1 {
+	reset-delay-us = <25000>;
+	reset-gpios = <&gpio4 RK_PC2 GPIO_ACTIVE_LOW>;
+	reset-post-delay-us = <100000>;
+
 	switch0: switch0@29 {
 		compatible = "realtek,rtl8367rb", "realtek,rtl8365mb";
 		#address-cells = <1>;
 		#size-cells = <0>;
 		reg = <29 0>;
 		dsa,member = <1 0>;
-		reset = <&gpio4 RK_PC2 GPIO_ACTIVE_LOW>;
+		//reset = <&gpio4 RK_PC2 GPIO_ACTIVE_LOW>;
 
 		ports {
 			#address-cells = <1>;
@@ -93,12 +108,4 @@
 			};
 		};
 	};
-};
-
-&gmac1 {
-	/delete-property/ snps,tso;
-	label = "eth0";
-
-	tx_delay = <0>;
-	rx_delay = <0>;
 };

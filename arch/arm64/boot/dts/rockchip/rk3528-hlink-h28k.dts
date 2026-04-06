@@ -13,18 +13,6 @@
 	aliases {
 		ethernet1 = &pcie_eth;
 	};
-
-	gpio_keys: gpio-keys {
-		compatible = "gpio-keys";
-		status = "okay";
-
-		key-factory {
-			debounce-interval = <100>;
-			gpios = <&gpio4 RK_PB5 GPIO_ACTIVE_LOW>;
-			label = "Reset Button";
-			linux,code = <KEY_RESTART>;
-		};
-	};
 };
 
 &i2c3 {
@@ -34,7 +22,7 @@
 &pcie {
 	status = "okay";
 	reset-gpios = <&gpio4 RK_PA3 GPIO_ACTIVE_HIGH>;
-	vpcie3v3-supply = <&vcc_3v3_s3>;
+	vpcie3v3-supply = <&vdd_3v3>;
 
 	pinctrl-names = "default";
 	pinctrl-0 = <&pcie_rtl8111_isolate>;
@@ -50,6 +38,7 @@
 
 		pcie_eth: pcie-eth@0,0 {
 			compatible = "pci10ec,8168";
+			label = "eth1";
 			reg = <0x000000 0 0 0 0>;
 			realtek,led-data = <0x0870>;
 		};
@@ -62,4 +51,17 @@
 			rockchip,pins = <4 RK_PA6 RK_FUNC_GPIO &pcfg_pull_up>;
 		};
 	};
+};
+
+&u2phy_otg {
+	status = "okay";
+};
+
+/* otg mode only */
+&usb_host0_xhci {
+	extcon = <&u2phy>;
+	maximum-speed = "high-speed";
+	phys = <&u2phy_otg>;
+	phy-names = "usb2-phy";
+	status = "okay";
 };

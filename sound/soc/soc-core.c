@@ -456,8 +456,7 @@ static void soc_free_pcm_runtime(struct snd_soc_pcm_runtime *rtd)
 
 	list_del(&rtd->list);
 
-	if (delayed_work_pending(&rtd->delayed_work))
-		flush_delayed_work(&rtd->delayed_work);
+	flush_delayed_work(&rtd->delayed_work);
 	snd_soc_pcm_component_free(rtd);
 
 	/*
@@ -1842,11 +1841,14 @@ static void cleanup_dmi_name(char *name)
 
 /*
  * Check if a DMI field is valid, i.e. not containing any string
- * in the black list.
+ * in the black list and not the empty string.
  */
 static int is_dmi_valid(const char *field)
 {
 	int i = 0;
+
+	if (!field[0])
+		return 0;
 
 	while (dmi_blacklist[i]) {
 		if (strstr(field, dmi_blacklist[i]))
@@ -2119,6 +2121,9 @@ static void soc_cleanup_card_resources(struct snd_soc_card *card)
 	for_each_card_rtds(card, rtd)
 		if (rtd->initialized)
 			snd_soc_link_exit(rtd);
+	/* flush delayed work before removing DAIs and DAPM widgets */
+	snd_soc_flush_all_delayed_work(card);
+
 	/* remove and free each DAI */
 	soc_remove_link_dais(card);
 	soc_remove_link_components(card);
@@ -2650,6 +2655,7 @@ struct snd_soc_dai *snd_soc_register_dai(struct snd_soc_component *component,
 {
 	struct device *dev = component->dev;
 	struct snd_soc_dai *dai;
+        struct snd_soc_dai_ops *ops; /* REMOVE ME */
 
 	lockdep_assert_held(&client_mutex);
 
@@ -2677,6 +2683,30 @@ struct snd_soc_dai *snd_soc_register_dai(struct snd_soc_component *component,
 	}
 	if (!dai->name)
 		return NULL;
+
+        /* REMOVE ME */
+        if (dai_drv->probe              ||
+            dai_drv->remove             ||
+            dai_drv->compress_new       ||
+            dai_drv->pcm_new            ||
+            dai_drv->probe_order        ||
+            dai_drv->remove_order) {
+
+                ops = devm_kzalloc(dev, sizeof(struct snd_soc_dai_ops), GFP_KERNEL);
+                if (!ops)
+                        return NULL;
+                if (dai_drv->ops)
+                        memcpy(ops, dai_drv->ops, sizeof(struct snd_soc_dai_ops));
+
+                ops->probe              = dai_drv->probe;
+                ops->remove             = dai_drv->remove;
+                ops->compress_new       = dai_drv->compress_new;
+                ops->pcm_new            = dai_drv->pcm_new;
+                ops->probe_order        = dai_drv->probe_order;
+                ops->remove_order       = dai_drv->remove_order;
+
+                dai_drv->ops = ops;
+        }
 
 	dai->component = component;
 	dai->dev = dev;
